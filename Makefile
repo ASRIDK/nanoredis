@@ -11,7 +11,7 @@ LIB_OBJ  := $(LIB_SRC:%.cpp=$(BUILD)/%.o)
 TEST_SRC := $(wildcard tests/unit/*.cpp)
 TEST_OBJ := $(TEST_SRC:tests/unit/%.cpp=$(BUILD)/tests/%.o)
 
-.PHONY: all test unit integration bench clean
+.PHONY: all test unit integration bench sanitize tsan clean
 
 all: $(BUILD)/nanoredis-server $(BUILD)/nanoredis-cli $(BUILD)/nanoredis-bench
 
@@ -49,6 +49,16 @@ bench: all
 	@./$(BUILD)/nanoredis-server -p 6390 >/dev/null 2>&1 & pid=$$!; sleep 0.3; \
 	for t in set get zadd; do ./$(BUILD)/nanoredis-bench -p 6390 -t $$t -n 200000 -c 4; echo; done; \
 	kill $$pid
+
+SAN_FLAGS := -std=c++17 -O1 -g -Wall -Wextra -Wpedantic -Werror -fno-omit-frame-pointer
+
+# Rebuilds with AddressSanitizer + UndefinedBehaviorSanitizer and runs all tests.
+sanitize: clean
+	$(MAKE) test CXXFLAGS="$(SAN_FLAGS) -fsanitize=address,undefined -fno-sanitize-recover=all"
+
+# Rebuilds with ThreadSanitizer and runs all tests.
+tsan: clean
+	$(MAKE) test CXXFLAGS="$(SAN_FLAGS) -fsanitize=thread"
 
 clean:
 	rm -rf $(BUILD)
