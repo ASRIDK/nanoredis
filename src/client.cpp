@@ -125,6 +125,20 @@ int read_response(int fd) {
 }  // namespace
 
 int main(int argc, char **argv) {
+    uint16_t port = kDefaultPort;
+    int first_arg = 1;
+    if (argc >= 3 && std::strcmp(argv[1], "-p") == 0) {
+        if (!parse_port(argv[2], port)) {
+            std::fprintf(stderr, "invalid port: %s\n", argv[2]);
+            return 1;
+        }
+        first_arg = 3;
+    }
+    if (first_arg >= argc) {
+        std::fprintf(stderr, "usage: %s [-p port] command [args...]\n", argv[0]);
+        return 1;
+    }
+
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         die("socket()");
@@ -132,13 +146,13 @@ int main(int argc, char **argv) {
 
     sockaddr_in addr = {};
     addr.sin_family = AF_INET;
-    addr.sin_port = htons(kDefaultPort);
+    addr.sin_port = htons(port);
     addr.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
     if (connect(fd, reinterpret_cast<const sockaddr *>(&addr), sizeof(addr)) != 0) {
         die("connect()");
     }
 
-    std::vector<std::string> args(argv + 1, argv + argc);
+    std::vector<std::string> args(argv + first_arg, argv + argc);
     std::vector<uint8_t> request = encode_request(args);
     int rc = write_all(fd, request.data(), request.size()) == 0 && read_response(fd) == 0 ? 0 : 1;
     close(fd);

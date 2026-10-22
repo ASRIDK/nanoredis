@@ -10,7 +10,7 @@ LIB_OBJ  := $(LIB_SRC:%.cpp=$(BUILD)/%.o)
 TEST_SRC := $(wildcard tests/unit/*.cpp)
 TEST_OBJ := $(TEST_SRC:tests/unit/%.cpp=$(BUILD)/tests/%.o)
 
-.PHONY: all test unit clean
+.PHONY: all test unit integration clean
 
 all: $(BUILD)/nanoredis-server $(BUILD)/nanoredis-cli
 
@@ -36,7 +36,10 @@ $(BUILD):
 unit: $(BUILD)/unit-tests
 	./$(BUILD)/unit-tests
 
-test: unit
+integration: all
+	python3 -m unittest discover -s tests/integration -v
+
+test: unit integration
 
 clean:
 	rm -rf $(BUILD)

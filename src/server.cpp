@@ -399,8 +399,20 @@ int create_listener(uint16_t port) {
 
 }  // namespace
 
-int main() {
-    int listen_fd = create_listener(kDefaultPort);
+int main(int argc, char **argv) {
+    uint16_t port = kDefaultPort;
+    if (argc == 3 && std::strcmp(argv[1], "-p") == 0) {
+        if (!parse_port(argv[2], port)) {
+            std::fprintf(stderr, "invalid port: %s\n", argv[2]);
+            return 1;
+        }
+    } else if (argc != 1) {
+        std::fprintf(stderr, "usage: %s [-p port]\n", argv[0]);
+        return 1;
+    }
+
+    int listen_fd = create_listener(port);
+    std::fprintf(stderr, "nanoredis listening on port %u\n", port);
 
     // Connections indexed by file descriptor.
     std::vector<std::unique_ptr<Conn>> fd2conn;
