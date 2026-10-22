@@ -9,35 +9,33 @@
 #include <vector>
 
 #include "net.h"
+#include "protocol.h"
 
 using namespace nanoredis;
 
-static int send_request(int fd, const std::string &text) {
-    uint32_t len = static_cast<uint32_t>(text.size());
-    if (len > kMaxMsg) {
-        return -1;
-    }
-    std::vector<uint8_t> wbuf(4 + len);
-    std::memcpy(wbuf.data(), &len, 4);
-    std::memcpy(wbuf.data() + 4, text.data(), len);
-    return write_all(fd, wbuf.data(), wbuf.size());
-}
-
 static int read_response(int fd) {
-    uint8_t rbuf[4 + kMaxMsg];
-    if (read_full(fd, rbuf, 4) != 0) {
+    std::vector<uint8_t> rbuf(4);
+    if (read_full(fd, rbuf.data(), 4) != 0) {
         return -1;
     }
     uint32_t len = 0;
-    std::memcpy(&len, rbuf, 4);
-    if (len > kMaxMsg || read_full(fd, rbuf + 4, len) != 0) {
+    std::memcpy(&len, rbuf.data(), 4);
+    if (len > kMaxMsg || len < 4) {
+        std::fprintf(stderr, "bad response length\n");
         return -1;
     }
-    std::printf("server says: %.*s\n", static_cast<int>(len), rbuf + 4);
+    rbuf.resize(4 + len);
+    if (read_full(fd, rbuf.data() + 4, len) != 0) {
+        return -1;
+    }
+
+    uint32_t status = 0;
+    std::memcpy(&status, rbuf.data() + 4, 4);
+    std::printf("[%u] %.*s\n", status, static_cast<int>(len - 4), rbuf.data() + 8);
     return 0;
 }
 
-int main() {
+int main(int argc, char **argv) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) {
         die("socket()");
@@ -51,17 +49,11 @@ int main() {
         die("connect()");
     }
 
-    // Pipeline several requests before reading any response.
-    const std::vector<std::string> requests = {"hello1", "hello2", "hello3"};
-    for (const auto &text : requests) {
-        if (send_request(fd, text) != 0) {
-            die("write()");
-        }
-    }
-    for (size_t i = 0; i < requests.size(); ++i) {
-        if (read_response(fd) != 0) {
-            die("read()");
-        }
+    std::vector<std::string> args(argv + 1, argv + argc);
+    std::vector<uint8_t> request = encode_request(args);
+    if (write_all(fd, request.data(), request.size()) != 0 || read_response(fd) != 0) {
+        close(fd);
+        return 1;
     }
     close(fd);
     return 0;

@@ -8,15 +8,58 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <map>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "buffer.h"
 #include "net.h"
+#include "protocol.h"
 
 using namespace nanoredis;
 
 namespace {
+
+// Response status codes.
+enum : uint32_t {
+    RES_OK = 0,
+    RES_ERR = 1,  // error
+    RES_NX = 2,   // key not found
+};
+
+struct Response {
+    uint32_t status = RES_OK;
+    std::string data;
+};
+
+// Placeholder keyspace; replaced by a custom hashtable later.
+std::map<std::string, std::string> g_data;
+
+void do_request(const std::vector<std::string> &cmd, Response &out) {
+    if (cmd.size() == 2 && cmd[0] == "get") {
+        auto it = g_data.find(cmd[1]);
+        if (it == g_data.end()) {
+            out.status = RES_NX;
+            return;
+        }
+        out.data = it->second;
+    } else if (cmd.size() == 3 && cmd[0] == "set") {
+        g_data[cmd[1]] = cmd[2];
+    } else if (cmd.size() == 2 && cmd[0] == "del") {
+        g_data.erase(cmd[1]);
+    } else {
+        out.status = RES_ERR;
+        out.data = "unknown command";
+    }
+}
+
+// Response wire format: | len (4) | status (4) | data |
+void make_response(const Response &resp, Buffer &out) {
+    out.append_u32(static_cast<uint32_t>(4 + resp.data.size()));
+    out.append_u32(resp.status);
+    out.append(resp.data.data(), resp.data.size());
+}
 
 struct Conn {
     int fd = -1;
@@ -66,10 +109,17 @@ bool try_one_request(Conn &conn) {
         return false;
     }
 
-    // Echo the request body back for now.
     const uint8_t *request = conn.incoming.data() + 4;
-    conn.outgoing.append_u32(len);
-    conn.outgoing.append(request, len);
+    std::vector<std::string> cmd;
+    if (!parse_request(request, len, cmd)) {
+        std::fprintf(stderr, "bad request\n");
+        conn.want_close = true;
+        return false;
+    }
+
+    Response resp;
+    do_request(cmd, resp);
+    make_response(resp, conn.outgoing);
 
     conn.incoming.consume(4 + len);
     return true;

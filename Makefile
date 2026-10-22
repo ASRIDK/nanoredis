@@ -8,10 +8,10 @@ BUILD := build
 
 all: $(BUILD)/nanoredis-server $(BUILD)/nanoredis-cli
 
-$(BUILD)/nanoredis-server: $(BUILD)/server.o $(BUILD)/net.o
+$(BUILD)/nanoredis-server: $(BUILD)/server.o $(BUILD)/net.o $(BUILD)/protocol.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
-$(BUILD)/nanoredis-cli: $(BUILD)/client.o $(BUILD)/net.o
+$(BUILD)/nanoredis-cli: $(BUILD)/client.o $(BUILD)/net.o $(BUILD)/protocol.o
 	$(CXX) $(CXXFLAGS) -o $@ $^ $(LDFLAGS)
 
 $(BUILD)/%.o: src/%.cpp | $(BUILD)
