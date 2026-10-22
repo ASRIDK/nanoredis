@@ -6,7 +6,9 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -16,6 +18,7 @@
 #include "hashtable.h"
 #include "net.h"
 #include "protocol.h"
+#include "zset.h"
 
 using namespace nanoredis;
 
@@ -23,10 +26,23 @@ namespace {
 
 // ---- Keyspace ----------------------------------------------------------------
 
-// A key-value pair in the keyspace.
+enum class ValueType : uint8_t { String, ZSet };
+
+// A key and its value in the keyspace.
 struct Entry : HNode {
+    explicit Entry(ValueType t) : type(t) {}
+    ~Entry() {
+        if (type == ValueType::ZSet) {
+            zset_clear(&zset);
+        }
+    }
+    Entry(const Entry &) = delete;
+    Entry &operator=(const Entry &) = delete;
+
     std::string key;
-    std::string value;
+    ValueType type;
+    std::string str;  // ValueType::String
+    ZSet zset;        // ValueType::ZSet
 };
 
 // Lookup key: carries only the hash and the key bytes.
@@ -49,30 +65,54 @@ LookupKey make_key(const std::string &key) {
     return k;
 }
 
+Entry *lookup_entry(const std::string &name) {
+    LookupKey key = make_key(name);
+    return static_cast<Entry *>(hm_lookup(&g_data.db, &key, entry_eq));
+}
+
+Entry *insert_entry(const std::string &name, ValueType type) {
+    auto *entry = new Entry(type);
+    entry->key = name;
+    entry->hcode = make_key(name).hcode;
+    hm_insert(&g_data.db, entry);
+    return entry;
+}
+
+bool parse_double(const std::string &s, double &out) {
+    char *end = nullptr;
+    out = std::strtod(s.c_str(), &end);
+    return !s.empty() && end == s.c_str() + s.size() && !std::isnan(out);
+}
+
+bool parse_int(const std::string &s, int64_t &out) {
+    char *end = nullptr;
+    out = std::strtoll(s.c_str(), &end, 10);
+    return !s.empty() && end == s.c_str() + s.size();
+}
+
 // ---- Commands ------------------------------------------------------------------
 
 using Args = std::vector<std::string>;
 
 void do_get(const Args &cmd, Buffer &out) {
-    LookupKey key = make_key(cmd[1]);
-    HNode *node = hm_lookup(&g_data.db, &key, entry_eq);
-    if (node == nullptr) {
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry == nullptr) {
         return out_nil(out);
     }
-    out_str(out, static_cast<Entry *>(node)->value);
+    if (entry->type != ValueType::String) {
+        return out_err(out, ERR_BAD_TYP, "not a string value");
+    }
+    out_str(out, entry->str);
 }
 
 void do_set(const Args &cmd, Buffer &out) {
-    LookupKey key = make_key(cmd[1]);
-    if (HNode *node = hm_lookup(&g_data.db, &key, entry_eq)) {
-        static_cast<Entry *>(node)->value = cmd[2];
-        return out_nil(out);
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry == nullptr) {
+        entry = insert_entry(cmd[1], ValueType::String);
+    } else if (entry->type != ValueType::String) {
+        return out_err(out, ERR_BAD_TYP, "a non-string value exists");
     }
-    auto *entry = new Entry();
-    entry->key = cmd[1];
-    entry->value = cmd[2];
-    entry->hcode = key.hcode;
-    hm_insert(&g_data.db, entry);
+    entry->str = cmd[2];
     out_nil(out);
 }
 
@@ -96,6 +136,118 @@ void do_keys(const Args &, Buffer &out) {
         &out);
 }
 
+// Returns the sorted set stored at `name`. A missing key yields an empty set
+// when `create` is false. Emits an error and returns null on a type mismatch.
+ZSet *expect_zset(const std::string &name, bool create, Buffer &out) {
+    static ZSet empty;
+    Entry *entry = lookup_entry(name);
+    if (entry == nullptr) {
+        return create ? &insert_entry(name, ValueType::ZSet)->zset : &empty;
+    }
+    if (entry->type != ValueType::ZSet) {
+        out_err(out, ERR_BAD_TYP, "expected a sorted set");
+        return nullptr;
+    }
+    return &entry->zset;
+}
+
+// zadd key score name
+void do_zadd(const Args &cmd, Buffer &out) {
+    double score = 0;
+    if (!parse_double(cmd[2], score)) {
+        return out_err(out, ERR_BAD_ARG, "expected a float score");
+    }
+    ZSet *zset = expect_zset(cmd[1], true, out);
+    if (zset == nullptr) {
+        return;
+    }
+    bool added = zset_insert(zset, cmd[3].data(), cmd[3].size(), score);
+    out_int(out, added ? 1 : 0);
+}
+
+// zrem key name
+void do_zrem(const Args &cmd, Buffer &out) {
+    ZSet *zset = expect_zset(cmd[1], false, out);
+    if (zset == nullptr) {
+        return;
+    }
+    ZNode *node = zset_lookup(zset, cmd[2].data(), cmd[2].size());
+    if (node != nullptr) {
+        zset_delete(zset, node);
+    }
+    out_int(out, node != nullptr ? 1 : 0);
+}
+
+// zscore key name
+void do_zscore(const Args &cmd, Buffer &out) {
+    ZSet *zset = expect_zset(cmd[1], false, out);
+    if (zset == nullptr) {
+        return;
+    }
+    ZNode *node = zset_lookup(zset, cmd[2].data(), cmd[2].size());
+    if (node == nullptr) {
+        return out_nil(out);
+    }
+    out_dbl(out, node->score);
+}
+
+// zrank key name
+void do_zrank(const Args &cmd, Buffer &out) {
+    ZSet *zset = expect_zset(cmd[1], false, out);
+    if (zset == nullptr) {
+        return;
+    }
+    ZNode *node = zset_lookup(zset, cmd[2].data(), cmd[2].size());
+    if (node == nullptr) {
+        return out_nil(out);
+    }
+    out_int(out, znode_rank(node));
+}
+
+// zcard key
+void do_zcard(const Args &cmd, Buffer &out) {
+    ZSet *zset = expect_zset(cmd[1], false, out);
+    if (zset == nullptr) {
+        return;
+    }
+    out_int(out, static_cast<int64_t>(zset_size(zset)));
+}
+
+// zquery key score name offset limit
+// Seeks to the first member >= (score, name), skips `offset` members, then
+// returns up to `limit` (name, score) pairs as a flat array.
+void do_zquery(const Args &cmd, Buffer &out) {
+    double score = 0;
+    if (!parse_double(cmd[2], score)) {
+        return out_err(out, ERR_BAD_ARG, "expected a float score");
+    }
+    int64_t offset = 0;
+    int64_t limit = 0;
+    if (!parse_int(cmd[4], offset) || !parse_int(cmd[5], limit)) {
+        return out_err(out, ERR_BAD_ARG, "expected an integer");
+    }
+    ZSet *zset = expect_zset(cmd[1], false, out);
+    if (zset == nullptr) {
+        return;
+    }
+    if (limit <= 0) {
+        return out_arr(out, 0);
+    }
+
+    ZNode *node = zset_seekge(zset, score, cmd[3].data(), cmd[3].size());
+    node = znode_offset(node, offset);
+
+    size_t ctx = out_begin_arr(out);
+    int64_t n = 0;
+    while (node != nullptr && n < limit * 2) {
+        out_str(out, node->name);
+        out_dbl(out, node->score);
+        node = znode_offset(node, 1);
+        n += 2;
+    }
+    out_end_arr(out, ctx, static_cast<uint32_t>(n));
+}
+
 struct Command {
     const char *name;
     size_t arity;  // number of strings including the command name
@@ -103,10 +255,10 @@ struct Command {
 };
 
 constexpr Command kCommands[] = {
-    {"get", 2, do_get},
-    {"set", 3, do_set},
-    {"del", 2, do_del},
-    {"keys", 1, do_keys},
+    {"get", 2, do_get},       {"set", 3, do_set},       {"del", 2, do_del},
+    {"keys", 1, do_keys},     {"zadd", 4, do_zadd},     {"zrem", 3, do_zrem},
+    {"zscore", 3, do_zscore}, {"zrank", 3, do_zrank},   {"zcard", 2, do_zcard},
+    {"zquery", 6, do_zquery},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
