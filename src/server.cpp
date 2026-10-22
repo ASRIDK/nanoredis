@@ -21,17 +21,7 @@ using namespace nanoredis;
 
 namespace {
 
-// Response status codes.
-enum : uint32_t {
-    RES_OK = 0,
-    RES_ERR = 1,  // error
-    RES_NX = 2,   // key not found
-};
-
-struct Response {
-    uint32_t status = RES_OK;
-    std::string data;
-};
+// ---- Keyspace ----------------------------------------------------------------
 
 // A key-value pair in the keyspace.
 struct Entry : HNode {
@@ -59,55 +49,76 @@ LookupKey make_key(const std::string &key) {
     return k;
 }
 
-void do_get(const std::vector<std::string> &cmd, Response &out) {
+// ---- Commands ------------------------------------------------------------------
+
+using Args = std::vector<std::string>;
+
+void do_get(const Args &cmd, Buffer &out) {
     LookupKey key = make_key(cmd[1]);
     HNode *node = hm_lookup(&g_data.db, &key, entry_eq);
     if (node == nullptr) {
-        out.status = RES_NX;
-        return;
+        return out_nil(out);
     }
-    out.data = static_cast<Entry *>(node)->value;
+    out_str(out, static_cast<Entry *>(node)->value);
 }
 
-void do_set(const std::vector<std::string> &cmd, Response &) {
+void do_set(const Args &cmd, Buffer &out) {
     LookupKey key = make_key(cmd[1]);
     if (HNode *node = hm_lookup(&g_data.db, &key, entry_eq)) {
         static_cast<Entry *>(node)->value = cmd[2];
-        return;
+        return out_nil(out);
     }
     auto *entry = new Entry();
     entry->key = cmd[1];
     entry->value = cmd[2];
     entry->hcode = key.hcode;
     hm_insert(&g_data.db, entry);
+    out_nil(out);
 }
 
-void do_del(const std::vector<std::string> &cmd, Response &) {
+void do_del(const Args &cmd, Buffer &out) {
     LookupKey key = make_key(cmd[1]);
-    if (HNode *node = hm_delete(&g_data.db, &key, entry_eq)) {
+    HNode *node = hm_delete(&g_data.db, &key, entry_eq);
+    if (node != nullptr) {
         delete static_cast<Entry *>(node);
     }
+    out_int(out, node != nullptr ? 1 : 0);
 }
 
-void do_request(const std::vector<std::string> &cmd, Response &out) {
-    if (cmd.size() == 2 && cmd[0] == "get") {
-        do_get(cmd, out);
-    } else if (cmd.size() == 3 && cmd[0] == "set") {
-        do_set(cmd, out);
-    } else if (cmd.size() == 2 && cmd[0] == "del") {
-        do_del(cmd, out);
-    } else {
-        out.status = RES_ERR;
-        out.data = "unknown command";
+void do_keys(const Args &, Buffer &out) {
+    out_arr(out, static_cast<uint32_t>(hm_size(&g_data.db)));
+    hm_foreach(
+        &g_data.db,
+        [](HNode *node, void *arg) {
+            out_str(*static_cast<Buffer *>(arg), static_cast<Entry *>(node)->key);
+            return true;
+        },
+        &out);
+}
+
+struct Command {
+    const char *name;
+    size_t arity;  // number of strings including the command name
+    void (*handler)(const Args &, Buffer &);
+};
+
+constexpr Command kCommands[] = {
+    {"get", 2, do_get},
+    {"set", 3, do_set},
+    {"del", 2, do_del},
+    {"keys", 1, do_keys},
+};
+
+void do_request(const Args &cmd, Buffer &out) {
+    for (const Command &c : kCommands) {
+        if (cmd.size() == c.arity && cmd[0] == c.name) {
+            return c.handler(cmd, out);
+        }
     }
+    out_err(out, ERR_UNKNOWN, "unknown command");
 }
 
-// Response wire format: | len (4) | status (4) | data |
-void make_response(const Response &resp, Buffer &out) {
-    out.append_u32(static_cast<uint32_t>(4 + resp.data.size()));
-    out.append_u32(resp.status);
-    out.append(resp.data.data(), resp.data.size());
-}
+// ---- Connections -----------------------------------------------------------------
 
 struct Conn {
     int fd = -1;
@@ -157,17 +168,16 @@ bool try_one_request(Conn &conn) {
         return false;
     }
 
-    const uint8_t *request = conn.incoming.data() + 4;
-    std::vector<std::string> cmd;
-    if (!parse_request(request, len, cmd)) {
+    Args cmd;
+    if (!parse_request(conn.incoming.data() + 4, len, cmd)) {
         std::fprintf(stderr, "bad request\n");
         conn.want_close = true;
         return false;
     }
 
-    Response resp;
-    do_request(cmd, resp);
-    make_response(resp, conn.outgoing);
+    size_t header = response_begin(conn.outgoing);
+    do_request(cmd, conn.outgoing);
+    response_end(conn.outgoing, header);
 
     conn.incoming.consume(4 + len);
     return true;

@@ -8,7 +8,7 @@
 namespace nanoredis {
 
 constexpr uint16_t kDefaultPort = 1234;
-constexpr size_t kMaxMsg = 4096;  // largest message body accepted on the wire
+constexpr size_t kMaxMsg = 32 << 20;  // largest message body accepted on the wire (32 MiB)
 
 // Prints `msg` with errno and aborts. Used for unrecoverable setup errors.
 [[noreturn]] void die(const char *msg);

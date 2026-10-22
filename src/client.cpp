@@ -13,27 +13,116 @@
 
 using namespace nanoredis;
 
-static int read_response(int fd) {
+namespace {
+
+// Pretty-prints one tagged value. Returns the number of bytes consumed, or -1.
+int64_t print_value(const uint8_t *data, size_t size, int depth) {
+    if (size < 1) {
+        return -1;
+    }
+    auto indent = [depth] {
+        for (int i = 0; i < depth; ++i) {
+            std::printf("  ");
+        }
+    };
+    uint32_t u32 = 0;
+    switch (data[0]) {
+    case TAG_NIL:
+        indent();
+        std::printf("(nil)\n");
+        return 1;
+    case TAG_ERR: {
+        if (size < 9) {
+            return -1;
+        }
+        uint32_t code = 0;
+        std::memcpy(&code, data + 1, 4);
+        std::memcpy(&u32, data + 5, 4);
+        if (size < 9 + static_cast<size_t>(u32)) {
+            return -1;
+        }
+        indent();
+        std::printf("(err) %u %.*s\n", code, static_cast<int>(u32), data + 9);
+        return 9 + u32;
+    }
+    case TAG_STR:
+        if (size < 5) {
+            return -1;
+        }
+        std::memcpy(&u32, data + 1, 4);
+        if (size < 5 + static_cast<size_t>(u32)) {
+            return -1;
+        }
+        indent();
+        std::printf("(str) %.*s\n", static_cast<int>(u32), data + 5);
+        return 5 + u32;
+    case TAG_INT: {
+        if (size < 9) {
+            return -1;
+        }
+        int64_t value = 0;
+        std::memcpy(&value, data + 1, 8);
+        indent();
+        std::printf("(int) %lld\n", static_cast<long long>(value));
+        return 9;
+    }
+    case TAG_DBL: {
+        if (size < 9) {
+            return -1;
+        }
+        double value = 0;
+        std::memcpy(&value, data + 1, 8);
+        indent();
+        std::printf("(dbl) %g\n", value);
+        return 9;
+    }
+    case TAG_ARR: {
+        if (size < 5) {
+            return -1;
+        }
+        std::memcpy(&u32, data + 1, 4);
+        indent();
+        std::printf("(arr) len=%u\n", u32);
+        size_t consumed = 5;
+        for (uint32_t i = 0; i < u32; ++i) {
+            int64_t rv = print_value(data + consumed, size - consumed, depth + 1);
+            if (rv < 0) {
+                return -1;
+            }
+            consumed += static_cast<size_t>(rv);
+        }
+        indent();
+        std::printf("(arr) end\n");
+        return static_cast<int64_t>(consumed);
+    }
+    default:
+        return -1;
+    }
+}
+
+int read_response(int fd) {
     std::vector<uint8_t> rbuf(4);
     if (read_full(fd, rbuf.data(), 4) != 0) {
         return -1;
     }
     uint32_t len = 0;
     std::memcpy(&len, rbuf.data(), 4);
-    if (len > kMaxMsg || len < 4) {
-        std::fprintf(stderr, "bad response length\n");
+    if (len > kMaxMsg) {
+        std::fprintf(stderr, "response too long\n");
         return -1;
     }
     rbuf.resize(4 + len);
     if (read_full(fd, rbuf.data() + 4, len) != 0) {
         return -1;
     }
-
-    uint32_t status = 0;
-    std::memcpy(&status, rbuf.data() + 4, 4);
-    std::printf("[%u] %.*s\n", status, static_cast<int>(len - 4), rbuf.data() + 8);
+    if (print_value(rbuf.data() + 4, len, 0) != static_cast<int64_t>(len)) {
+        std::fprintf(stderr, "bad response\n");
+        return -1;
+    }
     return 0;
 }
+
+}  // namespace
 
 int main(int argc, char **argv) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
@@ -51,10 +140,7 @@ int main(int argc, char **argv) {
 
     std::vector<std::string> args(argv + 1, argv + argc);
     std::vector<uint8_t> request = encode_request(args);
-    if (write_all(fd, request.data(), request.size()) != 0 || read_response(fd) != 0) {
-        close(fd);
-        return 1;
-    }
+    int rc = write_all(fd, request.data(), request.size()) == 0 && read_response(fd) == 0 ? 0 : 1;
     close(fd);
-    return 0;
+    return rc;
 }
