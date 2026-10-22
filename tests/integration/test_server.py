@@ -148,6 +148,52 @@ class TestSortedSets(ServerTestCase):
         self.assertEqual(c.call("zquery", "z", "1", "", "x", "1").code, 4)
 
 
+class TestExpiration(ServerTestCase):
+    def test_pttl_reports_missing_and_persistent_keys(self):
+        c = self.client
+        self.assertEqual(c.call("pttl", "missing"), -2)
+        c.call("set", "k", "v")
+        self.assertEqual(c.call("pttl", "k"), -1)
+        self.assertEqual(c.call("pexpire", "missing", "100"), 0)
+
+    def test_key_expires_after_ttl(self):
+        c = self.client
+        c.call("set", "k", "v")
+        self.assertEqual(c.call("pexpire", "k", "200"), 1)
+        ttl = c.call("pttl", "k")
+        self.assertTrue(0 < ttl <= 200)
+        time.sleep(0.4)
+        self.assertIsNone(c.call("get", "k"))
+        self.assertEqual(c.call("pttl", "k"), -2)
+
+    def test_negative_ttl_makes_key_persistent(self):
+        c = self.client
+        c.call("set", "k", "v")
+        c.call("pexpire", "k", "200")
+        c.call("pexpire", "k", "-1")
+        self.assertEqual(c.call("pttl", "k"), -1)
+        time.sleep(0.3)
+        self.assertEqual(c.call("get", "k"), "v")
+
+    def test_many_keys_expire(self):
+        c = self.client
+        for i in range(3000):
+            c.send("set", f"k{i}", "v")
+            c.send("pexpire", f"k{i}", str(50 + i % 100))
+        for _ in range(6000):
+            c.recv()
+        time.sleep(0.5)
+        self.assertEqual(c.call("keys"), [])
+
+    def test_deleting_a_key_with_ttl_is_safe(self):
+        c = self.client
+        c.call("zadd", "z", "1", "a")
+        c.call("pexpire", "z", "100")
+        self.assertEqual(c.call("del", "z"), 1)
+        time.sleep(0.2)
+        self.assertEqual(c.call("keys"), [])
+
+
 class TestIdleTimeout(ServerTestCase):
     server_args = ["-t", "300"]
 

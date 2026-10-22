@@ -17,6 +17,7 @@
 #include "buffer.h"
 #include "clock.h"
 #include "hashtable.h"
+#include "heap.h"
 #include "list.h"
 #include "net.h"
 #include "protocol.h"
@@ -31,7 +32,7 @@ namespace {
 enum class ValueType : uint8_t { String, ZSet };
 
 // A key and its value in the keyspace.
-struct Entry : HNode {
+struct Entry : HNode, HeapSlot {  // HeapSlot tracks the key's TTL in g_data.heap
     explicit Entry(ValueType t) : type(t) {}
     ~Entry() {
         if (type == ValueType::ZSet) {
@@ -59,7 +60,23 @@ struct {
     std::vector<std::unique_ptr<Conn>> fd2conn;  // connections indexed by fd
     DList idle_list;  // connections ordered by last activity, oldest first
     uint64_t idle_timeout_ms = 5000;
+    std::vector<HeapItem> heap;  // key expiration deadlines (monotonic ms)
 } g_data;
+
+// Sets or clears (ttl_ms < 0) the time-to-live of a key.
+void entry_set_ttl(Entry *entry, int64_t ttl_ms) {
+    if (ttl_ms < 0 && entry->heap_idx != kNotInHeap) {
+        heap_delete(g_data.heap, entry->heap_idx);
+    } else if (ttl_ms >= 0) {
+        uint64_t expire_at = monotonic_ms() + static_cast<uint64_t>(ttl_ms);
+        heap_upsert(g_data.heap, entry, expire_at);
+    }
+}
+
+void entry_destroy(Entry *entry) {
+    entry_set_ttl(entry, -1);
+    delete entry;
+}
 
 bool entry_eq(const HNode *node, const HNode *key) {
     return static_cast<const Entry *>(node)->key == static_cast<const LookupKey *>(key)->key;
@@ -127,9 +144,36 @@ void do_del(const Args &cmd, Buffer &out) {
     LookupKey key = make_key(cmd[1]);
     HNode *node = hm_delete(&g_data.db, &key, entry_eq);
     if (node != nullptr) {
-        delete static_cast<Entry *>(node);
+        entry_destroy(static_cast<Entry *>(node));
     }
     out_int(out, node != nullptr ? 1 : 0);
+}
+
+// pexpire key milliseconds  (a negative value removes the TTL)
+void do_pexpire(const Args &cmd, Buffer &out) {
+    int64_t ttl_ms = 0;
+    if (!parse_int(cmd[2], ttl_ms)) {
+        return out_err(out, ERR_BAD_ARG, "expected an integer");
+    }
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry != nullptr) {
+        entry_set_ttl(entry, ttl_ms);
+    }
+    out_int(out, entry != nullptr ? 1 : 0);
+}
+
+// pttl key  ->  remaining ms, -1 if the key has no TTL, -2 if it does not exist
+void do_pttl(const Args &cmd, Buffer &out) {
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry == nullptr) {
+        return out_int(out, -2);
+    }
+    if (entry->heap_idx == kNotInHeap) {
+        return out_int(out, -1);
+    }
+    uint64_t expire_at = g_data.heap[entry->heap_idx].val;
+    uint64_t now = monotonic_ms();
+    out_int(out, expire_at > now ? static_cast<int64_t>(expire_at - now) : 0);
 }
 
 void do_keys(const Args &, Buffer &out) {
@@ -265,7 +309,7 @@ constexpr Command kCommands[] = {
     {"get", 2, do_get},       {"set", 3, do_set},       {"del", 2, do_del},
     {"keys", 1, do_keys},     {"zadd", 4, do_zadd},     {"zrem", 3, do_zrem},
     {"zscore", 3, do_zscore}, {"zrank", 3, do_zrank},   {"zcard", 2, do_zcard},
-    {"zquery", 6, do_zquery},
+    {"zquery", 6, do_zquery}, {"pexpire", 3, do_pexpire}, {"pttl", 2, do_pttl},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
@@ -327,15 +371,21 @@ void conn_touch(Conn &conn) {
     dlist_insert_before(&g_data.idle_list, &conn);
 }
 
-// Milliseconds until the next timer fires, or -1 to wait indefinitely.
+// Milliseconds until the next timer (idle connection or key TTL), or -1.
 int next_timer_ms() {
-    if (dlist_empty(&g_data.idle_list)) {
+    uint64_t next = UINT64_MAX;
+    if (!dlist_empty(&g_data.idle_list)) {
+        const Conn *oldest = static_cast<const Conn *>(g_data.idle_list.next);
+        next = oldest->last_active_ms + g_data.idle_timeout_ms;
+    }
+    if (!g_data.heap.empty() && g_data.heap[0].val < next) {
+        next = g_data.heap[0].val;
+    }
+    if (next == UINT64_MAX) {
         return -1;
     }
     uint64_t now = monotonic_ms();
-    const Conn *oldest = static_cast<const Conn *>(g_data.idle_list.next);
-    uint64_t deadline = oldest->last_active_ms + g_data.idle_timeout_ms;
-    return deadline <= now ? 0 : static_cast<int>(deadline - now);
+    return next <= now ? 0 : static_cast<int>(next - now);
 }
 
 void process_timers() {
@@ -346,6 +396,17 @@ void process_timers() {
             break;  // the list is ordered, so nothing else has expired
         }
         conn_destroy(conn);
+    }
+
+    // Expire keys, bounding the work per tick so the event loop stays responsive.
+    constexpr size_t kMaxExpirationsPerTick = 2000;
+    size_t nworks = 0;
+    while (!g_data.heap.empty() && g_data.heap[0].val <= now &&
+           nworks++ < kMaxExpirationsPerTick) {
+        Entry *entry = static_cast<Entry *>(g_data.heap[0].ref);
+        // The heap hands back the exact node, so the keyspace lookup compares by identity.
+        hm_delete(&g_data.db, entry, [](const HNode *a, const HNode *b) { return a == b; });
+        entry_destroy(entry);
     }
 }
 
