@@ -12,7 +12,7 @@
 
 using namespace nanoredis;
 
-static int query(int fd, const std::string &text) {
+static int send_request(int fd, const std::string &text) {
     uint32_t len = static_cast<uint32_t>(text.size());
     if (len > kMaxMsg) {
         return -1;
@@ -20,14 +20,15 @@ static int query(int fd, const std::string &text) {
     std::vector<uint8_t> wbuf(4 + len);
     std::memcpy(wbuf.data(), &len, 4);
     std::memcpy(wbuf.data() + 4, text.data(), len);
-    if (write_all(fd, wbuf.data(), wbuf.size()) != 0) {
-        return -1;
-    }
+    return write_all(fd, wbuf.data(), wbuf.size());
+}
 
+static int read_response(int fd) {
     uint8_t rbuf[4 + kMaxMsg];
     if (read_full(fd, rbuf, 4) != 0) {
         return -1;
     }
+    uint32_t len = 0;
     std::memcpy(&len, rbuf, 4);
     if (len > kMaxMsg || read_full(fd, rbuf + 4, len) != 0) {
         return -1;
@@ -50,9 +51,16 @@ int main() {
         die("connect()");
     }
 
-    for (const char *text : {"hello1", "hello2", "hello3"}) {
-        if (query(fd, text) != 0) {
-            break;
+    // Pipeline several requests before reading any response.
+    const std::vector<std::string> requests = {"hello1", "hello2", "hello3"};
+    for (const auto &text : requests) {
+        if (send_request(fd, text) != 0) {
+            die("write()");
+        }
+    }
+    for (size_t i = 0; i < requests.size(); ++i) {
+        if (read_response(fd) != 0) {
+            die("read()");
         }
     }
     close(fd);
