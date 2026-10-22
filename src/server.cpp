@@ -21,6 +21,7 @@
 #include "list.h"
 #include "net.h"
 #include "protocol.h"
+#include "thread_pool.h"
 #include "zset.h"
 
 using namespace nanoredis;
@@ -73,8 +74,25 @@ void entry_set_ttl(Entry *entry, int64_t ttl_ms) {
     }
 }
 
+// Sorted sets larger than this are freed on a worker thread.
+constexpr size_t kLargeContainerSize = 1000;
+
+ThreadPool &background_pool() {
+    static ThreadPool pool(4);
+    return pool;
+}
+
 void entry_destroy(Entry *entry) {
     entry_set_ttl(entry, -1);
+    if (entry->type == ValueType::ZSet && zset_size(&entry->zset) > kLargeContainerSize) {
+        // Hand the members to a worker; the event loop only frees the empty shell.
+        auto *detached = new ZSet(entry->zset);
+        entry->zset = ZSet{};
+        background_pool().enqueue([detached] {
+            zset_clear(detached);
+            delete detached;
+        });
+    }
     delete entry;
 }
 

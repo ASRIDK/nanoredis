@@ -138,6 +138,17 @@ class TestSortedSets(ServerTestCase):
         self.assertEqual(c.call("zrank", "z", "m99"), 0)
         self.assertEqual(c.call("zrank", "z", "m0"), 99)
 
+    def test_deleting_a_large_sorted_set(self):
+        c = self.client
+        for i in range(5000):
+            c.send("zadd", "big", str(i), f"m{i}")
+        for _ in range(5000):
+            c.recv()
+        self.assertEqual(c.call("zcard", "big"), 5000)
+        self.assertEqual(c.call("del", "big"), 1)
+        self.assertEqual(c.call("zcard", "big"), 0)
+        self.assertEqual(c.call("keys"), [])
+
     def test_type_errors(self):
         c = self.client
         c.call("set", "s", "v")
