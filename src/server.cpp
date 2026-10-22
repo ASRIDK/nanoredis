@@ -15,7 +15,9 @@
 #include <vector>
 
 #include "buffer.h"
+#include "clock.h"
 #include "hashtable.h"
+#include "list.h"
 #include "net.h"
 #include "protocol.h"
 #include "zset.h"
@@ -50,8 +52,13 @@ struct LookupKey : HNode {
     std::string key;
 };
 
+struct Conn;
+
 struct {
     HMap db;  // the top-level keyspace
+    std::vector<std::unique_ptr<Conn>> fd2conn;  // connections indexed by fd
+    DList idle_list;  // connections ordered by last activity, oldest first
+    uint64_t idle_timeout_ms = 5000;
 } g_data;
 
 bool entry_eq(const HNode *node, const HNode *key) {
@@ -272,8 +279,9 @@ void do_request(const Args &cmd, Buffer &out) {
 
 // ---- Connections -----------------------------------------------------------------
 
-struct Conn {
+struct Conn : DList {  // DList links the connection into g_data.idle_list
     int fd = -1;
+    uint64_t last_active_ms = 0;
     // What the event loop should wait for on this socket.
     bool want_read = false;
     bool want_write = false;
@@ -301,7 +309,44 @@ std::unique_ptr<Conn> handle_accept(int listen_fd) {
     auto conn = std::make_unique<Conn>();
     conn->fd = connfd;
     conn->want_read = true;
+    conn->last_active_ms = monotonic_ms();
+    dlist_insert_before(&g_data.idle_list, conn.get());
     return conn;
+}
+
+void conn_destroy(Conn *conn) {
+    close(conn->fd);
+    dlist_detach(conn);
+    g_data.fd2conn[static_cast<size_t>(conn->fd)].reset();
+}
+
+// Moves a connection to the back of the idle list after any activity.
+void conn_touch(Conn &conn) {
+    conn.last_active_ms = monotonic_ms();
+    dlist_detach(&conn);
+    dlist_insert_before(&g_data.idle_list, &conn);
+}
+
+// Milliseconds until the next timer fires, or -1 to wait indefinitely.
+int next_timer_ms() {
+    if (dlist_empty(&g_data.idle_list)) {
+        return -1;
+    }
+    uint64_t now = monotonic_ms();
+    const Conn *oldest = static_cast<const Conn *>(g_data.idle_list.next);
+    uint64_t deadline = oldest->last_active_ms + g_data.idle_timeout_ms;
+    return deadline <= now ? 0 : static_cast<int>(deadline - now);
+}
+
+void process_timers() {
+    uint64_t now = monotonic_ms();
+    while (!dlist_empty(&g_data.idle_list)) {
+        Conn *conn = static_cast<Conn *>(g_data.idle_list.next);
+        if (conn->last_active_ms + g_data.idle_timeout_ms > now) {
+            break;  // the list is ordered, so nothing else has expired
+        }
+        conn_destroy(conn);
+    }
 }
 
 // Parses and handles one complete request from the incoming buffer, if present.
@@ -401,21 +446,25 @@ int create_listener(uint16_t port) {
 
 int main(int argc, char **argv) {
     uint16_t port = kDefaultPort;
-    if (argc == 3 && std::strcmp(argv[1], "-p") == 0) {
-        if (!parse_port(argv[2], port)) {
-            std::fprintf(stderr, "invalid port: %s\n", argv[2]);
-            return 1;
+    for (int i = 1; i < argc; i += 2) {
+        bool has_value = i + 1 < argc;
+        if (has_value && std::strcmp(argv[i], "-p") == 0 && parse_port(argv[i + 1], port)) {
+            continue;
         }
-    } else if (argc != 1) {
-        std::fprintf(stderr, "usage: %s [-p port]\n", argv[0]);
+        int64_t timeout = 0;
+        if (has_value && std::strcmp(argv[i], "-t") == 0 && parse_int(argv[i + 1], timeout) &&
+            timeout > 0) {
+            g_data.idle_timeout_ms = static_cast<uint64_t>(timeout);
+            continue;
+        }
+        std::fprintf(stderr, "usage: %s [-p port] [-t idle_timeout_ms]\n", argv[0]);
         return 1;
     }
 
     int listen_fd = create_listener(port);
     std::fprintf(stderr, "nanoredis listening on port %u\n", port);
 
-    // Connections indexed by file descriptor.
-    std::vector<std::unique_ptr<Conn>> fd2conn;
+    auto &fd2conn = g_data.fd2conn;
     std::vector<pollfd> poll_args;
 
     for (;;) {
@@ -435,7 +484,7 @@ int main(int argc, char **argv) {
             poll_args.push_back({conn->fd, events, 0});
         }
 
-        int rv = poll(poll_args.data(), static_cast<nfds_t>(poll_args.size()), -1);
+        int rv = poll(poll_args.data(), static_cast<nfds_t>(poll_args.size()), next_timer_ms());
         if (rv < 0 && errno == EINTR) {
             continue;
         }
@@ -459,6 +508,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             Conn &conn = *fd2conn[static_cast<size_t>(poll_args[i].fd)];
+            conn_touch(conn);
             if (ready & POLLIN) {
                 handle_read(conn);
             }
@@ -466,9 +516,10 @@ int main(int argc, char **argv) {
                 handle_write(conn);
             }
             if ((ready & POLLERR) || conn.want_close) {
-                close(conn.fd);
-                fd2conn[static_cast<size_t>(conn.fd)].reset();
+                conn_destroy(&conn);
             }
         }
+
+        process_timers();
     }
 }

@@ -19,10 +19,12 @@ def free_port():
 
 
 class ServerTestCase(unittest.TestCase):
+    server_args = []
+
     def setUp(self):
         self.port = free_port()
         self.proc = subprocess.Popen(
-            [str(SERVER), "-p", str(self.port)],
+            [str(SERVER), "-p", str(self.port), *self.server_args],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
@@ -144,6 +146,20 @@ class TestSortedSets(ServerTestCase):
         self.assertEqual(c.call("get", "z").code, 3)
         self.assertEqual(c.call("zadd", "z", "nan", "a").code, 4)
         self.assertEqual(c.call("zquery", "z", "1", "", "x", "1").code, 4)
+
+
+class TestIdleTimeout(ServerTestCase):
+    server_args = ["-t", "300"]
+
+    def test_idle_connection_is_closed(self):
+        time.sleep(0.6)
+        self.client.sock.settimeout(2)
+        self.assertEqual(self.client.sock.recv(1), b"")
+
+    def test_active_connection_is_kept_alive(self):
+        for _ in range(6):
+            time.sleep(0.1)
+            self.assertIsNone(self.client.call("get", "k"))
 
 
 if __name__ == "__main__":
