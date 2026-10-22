@@ -5,7 +5,7 @@ LDFLAGS  ?=
 BUILD := build
 
 # Core library shared by the server, the client and the unit tests.
-LIB_SRC  := net.cpp protocol.cpp hashtable.cpp
+LIB_SRC  := net.cpp protocol.cpp hashtable.cpp avl.cpp
 LIB_OBJ  := $(LIB_SRC:%.cpp=$(BUILD)/%.o)
 TEST_SRC := $(wildcard tests/unit/*.cpp)
 TEST_OBJ := $(TEST_SRC:tests/unit/%.cpp=$(BUILD)/tests/%.o)
