@@ -12,11 +12,13 @@ void avl_update(AVLNode *node) {
     node->cnt = 1 + avl_cnt(node->left) + avl_cnt(node->right);
 }
 
-//     node              new_node
-//    /    \            /        \
-//   a   new_node  ->  node       c
-//       /     \      /    \
-//    inner     c    a    inner
+/*
+ *     node              new_node
+ *    /    \            /        \
+ *   a   new_node  ->  node       c
+ *       /     \      /    \
+ *    inner     c    a    inner
+ */
 AVLNode *rot_left(AVLNode *node) {
     AVLNode *parent = node->parent;
     AVLNode *new_node = node->right;
