@@ -8,12 +8,12 @@
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
-#include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
 #include "buffer.h"
+#include "hashtable.h"
 #include "net.h"
 #include "protocol.h"
 
@@ -33,21 +33,69 @@ struct Response {
     std::string data;
 };
 
-// Placeholder keyspace; replaced by a custom hashtable later.
-std::map<std::string, std::string> g_data;
+// A key-value pair in the keyspace.
+struct Entry : HNode {
+    std::string key;
+    std::string value;
+};
+
+// Lookup key: carries only the hash and the key bytes.
+struct LookupKey : HNode {
+    std::string key;
+};
+
+struct {
+    HMap db;  // the top-level keyspace
+} g_data;
+
+bool entry_eq(const HNode *node, const HNode *key) {
+    return static_cast<const Entry *>(node)->key == static_cast<const LookupKey *>(key)->key;
+}
+
+LookupKey make_key(const std::string &key) {
+    LookupKey k;
+    k.key = key;
+    k.hcode = str_hash(reinterpret_cast<const uint8_t *>(key.data()), key.size());
+    return k;
+}
+
+void do_get(const std::vector<std::string> &cmd, Response &out) {
+    LookupKey key = make_key(cmd[1]);
+    HNode *node = hm_lookup(&g_data.db, &key, entry_eq);
+    if (node == nullptr) {
+        out.status = RES_NX;
+        return;
+    }
+    out.data = static_cast<Entry *>(node)->value;
+}
+
+void do_set(const std::vector<std::string> &cmd, Response &) {
+    LookupKey key = make_key(cmd[1]);
+    if (HNode *node = hm_lookup(&g_data.db, &key, entry_eq)) {
+        static_cast<Entry *>(node)->value = cmd[2];
+        return;
+    }
+    auto *entry = new Entry();
+    entry->key = cmd[1];
+    entry->value = cmd[2];
+    entry->hcode = key.hcode;
+    hm_insert(&g_data.db, entry);
+}
+
+void do_del(const std::vector<std::string> &cmd, Response &) {
+    LookupKey key = make_key(cmd[1]);
+    if (HNode *node = hm_delete(&g_data.db, &key, entry_eq)) {
+        delete static_cast<Entry *>(node);
+    }
+}
 
 void do_request(const std::vector<std::string> &cmd, Response &out) {
     if (cmd.size() == 2 && cmd[0] == "get") {
-        auto it = g_data.find(cmd[1]);
-        if (it == g_data.end()) {
-            out.status = RES_NX;
-            return;
-        }
-        out.data = it->second;
+        do_get(cmd, out);
     } else if (cmd.size() == 3 && cmd[0] == "set") {
-        g_data[cmd[1]] = cmd[2];
+        do_set(cmd, out);
     } else if (cmd.size() == 2 && cmd[0] == "del") {
-        g_data.erase(cmd[1]);
+        do_del(cmd, out);
     } else {
         out.status = RES_ERR;
         out.data = "unknown command";
