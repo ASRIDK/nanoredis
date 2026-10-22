@@ -10,19 +10,30 @@
 
 using namespace nanoredis;
 
-static void handle_connection(int connfd) {
-    char rbuf[64] = {};
-    ssize_t n = read(connfd, rbuf, sizeof(rbuf) - 1);
-    if (n < 0) {
-        log_errno("read() error");
-        return;
+// Handles one length-prefixed request: | len (4) | body (len) |, and echoes "world".
+static int one_request(int connfd) {
+    uint8_t rbuf[4 + kMaxMsg];
+    if (read_full(connfd, rbuf, 4) != 0) {
+        return -1;
     }
-    std::printf("client says: %s\n", rbuf);
 
-    const char wbuf[] = "world";
-    if (write(connfd, wbuf, std::strlen(wbuf)) < 0) {
-        log_errno("write() error");
+    uint32_t len = 0;
+    std::memcpy(&len, rbuf, 4);
+    if (len > kMaxMsg) {
+        std::fprintf(stderr, "message too long\n");
+        return -1;
     }
+    if (read_full(connfd, rbuf + 4, len) != 0) {
+        return -1;
+    }
+    std::printf("client says: %.*s\n", static_cast<int>(len), rbuf + 4);
+
+    const char reply[] = "world";
+    uint8_t wbuf[4 + sizeof(reply)];
+    len = static_cast<uint32_t>(std::strlen(reply));
+    std::memcpy(wbuf, &len, 4);
+    std::memcpy(wbuf + 4, reply, len);
+    return write_all(connfd, wbuf, 4 + len);
 }
 
 int main() {
@@ -52,7 +63,9 @@ int main() {
         if (connfd < 0) {
             continue;
         }
-        handle_connection(connfd);
+        // Serve requests on this connection until the client disconnects.
+        while (one_request(connfd) == 0) {
+        }
         close(connfd);
     }
 }
