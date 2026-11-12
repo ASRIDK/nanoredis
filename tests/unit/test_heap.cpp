@@ -62,3 +62,64 @@ TEST(heap_random_upsert_and_delete_keep_invariants) {
         heap_delete(heap, 0);
     }
 }
+
+TEST(heap_single_item_insert_and_delete) {
+    std::vector<HeapItem> heap;
+    Owner a;
+    heap_upsert(heap, &a, 7);
+    CHECK(heap.size() == 1);
+    CHECK(a.heap_idx == 0);
+    heap_delete(heap, 0);
+    CHECK(heap.empty());
+    CHECK(a.heap_idx == kNotInHeap);
+
+    // A removed slot can be inserted again.
+    heap_upsert(heap, &a, 3);
+    CHECK(heap.size() == 1);
+    CHECK(a.heap_idx == 0);
+}
+
+TEST(heap_root_is_minimum_after_ascending_and_descending_inserts) {
+    for (int descending = 0; descending < 2; ++descending) {
+        std::vector<HeapItem> heap;
+        std::vector<Owner> owners(64);
+        for (size_t i = 0; i < owners.size(); ++i) {
+            uint64_t v = descending ? owners.size() - i : i + 1;
+            heap_upsert(heap, &owners[i], v);
+        }
+        verify(heap);
+        CHECK(heap[0].val == 1);
+    }
+}
+
+TEST(heap_upsert_moves_item_up_and_down) {
+    std::vector<HeapItem> heap;
+    std::vector<Owner> owners(16);
+    for (size_t i = 0; i < owners.size(); ++i) {
+        heap_upsert(heap, &owners[i], (i + 1) * 10);
+    }
+    // Lowering the largest value makes it the new root.
+    heap_upsert(heap, &owners[15], 1);
+    CHECK(heap[0].ref == &owners[15]);
+    verify(heap);
+    // Raising the root sinks it below its former children.
+    heap_upsert(heap, &owners[15], 1000);
+    CHECK(heap[0].ref == &owners[0]);
+    CHECK(owners[15].heap_idx != 0);
+    verify(heap);
+    CHECK(heap.size() == owners.size());  // upsert never duplicates
+}
+
+TEST(heap_handles_duplicate_values) {
+    std::vector<HeapItem> heap;
+    std::vector<Owner> owners(20);
+    for (auto &o : owners) {
+        heap_upsert(heap, &o, 5);
+    }
+    verify(heap);
+    while (!heap.empty()) {
+        CHECK(heap[0].val == 5);
+        heap_delete(heap, heap.size() - 1);  // deleting the last slot is a special case
+        verify(heap);
+    }
+}
