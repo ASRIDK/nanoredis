@@ -102,3 +102,83 @@ TEST(hashtable_foreach_visits_every_node_once) {
         delete item;
     }
 }
+
+TEST(hashtable_delete_missing_key_returns_null) {
+    HMap map;
+    Item *only = new Item(1);
+    hm_insert(&map, only);
+    Item missing(2);
+    CHECK(hm_delete(&map, &missing, item_eq) == nullptr);
+    CHECK(hm_size(&map) == 1);
+    HMap empty;
+    CHECK(hm_delete(&empty, &missing, item_eq) == nullptr);
+    CHECK(hm_lookup(&empty, &missing, item_eq) == nullptr);
+    CHECK(hm_size(&empty) == 0);
+    hm_clear(&map);
+    delete only;
+}
+
+TEST(hashtable_delete_during_progressive_rehash) {
+    HMap map;
+    std::vector<Item *> items;
+    for (int i = 0; i < 256; ++i) {
+        items.push_back(new Item(i));
+        hm_insert(&map, items.back());
+    }
+    CHECK(map.older.tab != nullptr);  // rehash still in flight
+    for (int i = 0; i < 256; i += 2) {
+        Item key(i);
+        CHECK(hm_delete(&map, &key, item_eq) == items[i]);
+    }
+    CHECK(hm_size(&map) == 128);
+    for (int i = 0; i < 256; ++i) {
+        CHECK((find(map, i) != nullptr) == (i % 2 == 1));
+    }
+    hm_clear(&map);
+    for (Item *item : items) {
+        delete item;
+    }
+}
+
+TEST(hashtable_foreach_stops_when_callback_returns_false) {
+    HMap map;
+    std::vector<Item *> items;
+    for (int i = 0; i < 100; ++i) {
+        items.push_back(new Item(i));
+        hm_insert(&map, items.back());
+    }
+    int visited = 0;
+    hm_foreach(
+        &map,
+        [](HNode *, void *arg) {
+            return ++*static_cast<int *>(arg) < 5;
+        },
+        &visited);
+    CHECK(visited == 5);
+    hm_clear(&map);
+    for (Item *item : items) {
+        delete item;
+    }
+}
+
+TEST(hashtable_reusable_after_clear) {
+    HMap map;
+    Item a(7);
+    hm_insert(&map, &a);
+    hm_clear(&map);
+    CHECK(hm_size(&map) == 0);
+    CHECK(find(map, 7) == nullptr);
+    Item b(8);
+    hm_insert(&map, &b);
+    CHECK(find(map, 8) == &b);
+    hm_clear(&map);
+}
+
+TEST(str_hash_is_deterministic_and_input_sensitive) {
+    const uint8_t abc[] = {'a', 'b', 'c'};
+    const uint8_t abd[] = {'a', 'b', 'd'};
+    CHECK(str_hash(abc, 3) == str_hash(abc, 3));
+    CHECK(str_hash(abc, 3) != str_hash(abd, 3));
+    CHECK(str_hash(abc, 2) != str_hash(abc, 3));
+    CHECK(str_hash(abc, 0) == 0x811C9DC5);  // FNV offset basis for empty input
+}
