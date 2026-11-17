@@ -159,6 +159,47 @@ class TestSortedSets(ServerTestCase):
         self.assertEqual(c.call("zquery", "z", "1", "", "x", "1").code, 4)
 
 
+class TestEdgeCases(ServerTestCase):
+    def test_wrong_argument_count_is_an_unknown_command(self):
+        c = self.client
+        for args in (("get",), ("set", "k"), ("del",), ("zcard", "z", "x"), ("keys", "x")):
+            self.assertEqual(c.call(*args).code, 1, args)
+
+    def test_sorted_set_commands_on_a_missing_key(self):
+        c = self.client
+        self.assertEqual(c.call("zcard", "nokey"), 0)
+        self.assertIsNone(c.call("zrank", "nokey", "m"))
+        self.assertIsNone(c.call("zscore", "nokey", "m"))
+        self.assertEqual(c.call("zrem", "nokey", "m"), 0)
+        self.assertEqual(c.call("zquery", "nokey", "0", "", "0", "10"), [])
+        self.assertEqual(c.call("keys"), [])  # reads must not create the key
+
+    def test_pexpire_on_missing_key_and_bad_argument(self):
+        c = self.client
+        self.assertEqual(c.call("pexpire", "nokey", "100"), 0)
+        self.assertEqual(c.call("pexpire", "nokey", "abc").code, 4)
+        self.assertEqual(c.call("pttl", "nokey"), -2)
+
+    def test_zquery_with_zero_or_negative_offset_and_limit(self):
+        c = self.client
+        c.call("zadd", "z", "1", "a")
+        self.assertEqual(c.call("zquery", "z", "0", "", "0", "0"), [])
+        self.assertEqual(c.call("zquery", "z", "0", "", "0", "-5"), [])
+        self.assertEqual(c.call("zquery", "z", "0", "", "-1", "10"), [])
+
+    def test_infinite_scores_sort_at_the_extremes(self):
+        c = self.client
+        c.call("zadd", "z", "1", "mid")
+        c.call("zadd", "z", "inf", "top")
+        c.call("zadd", "z", "-inf", "bottom")
+        self.assertEqual(
+            c.call("zquery", "z", "-inf", "", "0", "10"),
+            ["bottom", float("-inf"), "mid", 1.0, "top", float("inf")],
+        )
+        self.assertEqual(c.call("zrank", "z", "top"), 2)
+        self.assertEqual(c.call("zadd", "z", "abc", "x").code, 4)
+
+
 class TestExpiration(ServerTestCase):
     def test_pttl_reports_missing_and_persistent_keys(self):
         c = self.client
