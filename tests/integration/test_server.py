@@ -56,6 +56,37 @@ class TestStrings(ServerTestCase):
         self.assertEqual(c.call("del", "k"), 0)
         self.assertIsNone(c.call("get", "k"))
 
+    def test_exists_covers_strings_and_sorted_sets(self):
+        c = self.client
+        self.assertEqual(c.call("exists", "k"), 0)
+        c.call("set", "k", "v")
+        c.call("zadd", "z", "1", "m")
+        self.assertEqual(c.call("exists", "k"), 1)
+        self.assertEqual(c.call("exists", "z"), 1)
+        c.call("del", "k")
+        self.assertEqual(c.call("exists", "k"), 0)
+
+    def test_dbsize_tracks_inserts_overwrites_and_deletes(self):
+        c = self.client
+        self.assertEqual(c.call("dbsize"), 0)
+        for i in range(50):
+            c.call("set", f"key{i}", "v")
+        c.call("set", "key0", "again")
+        c.call("zadd", "z", "1", "m")
+        self.assertEqual(c.call("dbsize"), 51)
+        c.call("del", "key1")
+        c.call("del", "missing")
+        self.assertEqual(c.call("dbsize"), 50)
+        self.assertEqual(c.call("dbsize"), len(c.call("keys")))
+
+    def test_dbsize_drops_when_a_key_expires(self):
+        c = self.client
+        c.call("set", "k", "v")
+        c.call("pexpire", "k", "50")
+        time.sleep(0.3)
+        self.assertEqual(c.call("dbsize"), 0)
+        self.assertEqual(c.call("exists", "k"), 0)
+
     def test_keys_lists_every_key(self):
         for i in range(100):
             self.client.call("set", f"key{i}", str(i))
