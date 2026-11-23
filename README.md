@@ -91,6 +91,8 @@ $ ./build/nanoredis-cli pttl session
 | `get key`                                 | string, or nil                         |
 | `set key value`                           | nil                                    |
 | `del key`                                 | int: 1 if removed, 0 otherwise         |
+| `exists key`                              | int: 1 if the key exists, 0 otherwise  |
+| `dbsize`                                  | int: number of keys                    |
 | `keys`                                    | array of all keys                      |
 | `pexpire key ms`                          | int: 1 if the key exists (`ms < 0` clears the TTL) |
 | `pttl key`                                | int: remaining ms, -1 no TTL, -2 no key |

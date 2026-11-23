@@ -194,6 +194,16 @@ void do_pttl(const Args &cmd, Buffer &out) {
     out_int(out, expire_at > now ? static_cast<int64_t>(expire_at - now) : 0);
 }
 
+// exists key  ->  1 if the key exists (of any type), 0 otherwise
+void do_exists(const Args &cmd, Buffer &out) {
+    out_int(out, lookup_entry(cmd[1]) != nullptr ? 1 : 0);
+}
+
+// dbsize  ->  number of keys
+void do_dbsize(const Args &, Buffer &out) {
+    out_int(out, static_cast<int64_t>(hm_size(&g_data.db)));
+}
+
 void do_keys(const Args &, Buffer &out) {
     out_arr(out, static_cast<uint32_t>(hm_size(&g_data.db)));
     hm_foreach(
@@ -328,6 +338,7 @@ constexpr Command kCommands[] = {
     {"keys", 1, do_keys},     {"zadd", 4, do_zadd},     {"zrem", 3, do_zrem},
     {"zscore", 3, do_zscore}, {"zrank", 3, do_zrank},   {"zcard", 2, do_zcard},
     {"zquery", 6, do_zquery}, {"pexpire", 3, do_pexpire}, {"pttl", 2, do_pttl},
+    {"exists", 2, do_exists}, {"dbsize", 1, do_dbsize},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
