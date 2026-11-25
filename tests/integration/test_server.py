@@ -92,6 +92,23 @@ class TestStrings(ServerTestCase):
             self.client.call("set", f"key{i}", str(i))
         self.assertEqual(sorted(self.client.call("keys")), sorted(f"key{i}" for i in range(100)))
 
+    def test_strlen_and_append(self):
+        c = self.client
+        self.assertEqual(c.call("strlen", "k"), 0)
+        self.assertEqual(c.call("append", "k", "hello"), 5)
+        self.assertEqual(c.call("append", "k", " world"), 11)
+        self.assertEqual(c.call("strlen", "k"), 11)
+        self.assertEqual(c.call("get", "k"), "hello world")
+        self.assertEqual(c.call("append", "k", ""), 11)
+
+    def test_strlen_and_append_reject_sorted_sets(self):
+        c = self.client
+        c.call("zadd", "z", "1", "m")
+        for args in (("strlen", "z"), ("append", "z", "x")):
+            err = c.call(*args)
+            self.assertIsInstance(err, ServerError)
+            self.assertEqual(err.code, 3)
+
     def test_unknown_command_is_an_error(self):
         err = self.client.call("nope")
         self.assertIsInstance(err, ServerError)

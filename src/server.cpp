@@ -204,6 +204,30 @@ void do_dbsize(const Args &, Buffer &out) {
     out_int(out, static_cast<int64_t>(hm_size(&g_data.db)));
 }
 
+// strlen key  ->  length in bytes of the string value, 0 if the key does not exist
+void do_strlen(const Args &cmd, Buffer &out) {
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry == nullptr) {
+        return out_int(out, 0);
+    }
+    if (entry->type != ValueType::String) {
+        return out_err(out, ERR_BAD_TYP, "not a string value");
+    }
+    out_int(out, static_cast<int64_t>(entry->str.size()));
+}
+
+// append key value  ->  length of the string after the append (creates the key if missing)
+void do_append(const Args &cmd, Buffer &out) {
+    Entry *entry = lookup_entry(cmd[1]);
+    if (entry == nullptr) {
+        entry = insert_entry(cmd[1], ValueType::String);
+    } else if (entry->type != ValueType::String) {
+        return out_err(out, ERR_BAD_TYP, "a non-string value exists");
+    }
+    entry->str += cmd[2];
+    out_int(out, static_cast<int64_t>(entry->str.size()));
+}
+
 void do_keys(const Args &, Buffer &out) {
     out_arr(out, static_cast<uint32_t>(hm_size(&g_data.db)));
     hm_foreach(
@@ -339,6 +363,7 @@ constexpr Command kCommands[] = {
     {"zscore", 3, do_zscore}, {"zrank", 3, do_zrank},   {"zcard", 2, do_zcard},
     {"zquery", 6, do_zquery}, {"pexpire", 3, do_pexpire}, {"pttl", 2, do_pttl},
     {"exists", 2, do_exists}, {"dbsize", 1, do_dbsize},
+    {"strlen", 2, do_strlen}, {"append", 3, do_append},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
