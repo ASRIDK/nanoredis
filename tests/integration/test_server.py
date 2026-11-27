@@ -109,6 +109,36 @@ class TestStrings(ServerTestCase):
             self.assertIsInstance(err, ServerError)
             self.assertEqual(err.code, 3)
 
+    def test_incr_decr_and_incrby(self):
+        c = self.client
+        self.assertEqual(c.call("incr", "n"), 1)
+        self.assertEqual(c.call("incr", "n"), 2)
+        self.assertEqual(c.call("decr", "n"), 1)
+        self.assertEqual(c.call("incrby", "n", "-10"), -9)
+        self.assertEqual(c.call("get", "n"), "-9")
+        self.assertEqual(c.call("incrby", "fresh", "41"), 41)
+        self.assertEqual(c.call("dbsize"), 2)
+
+    def test_incr_rejects_bad_values_overflow_and_wrong_types(self):
+        c = self.client
+        c.call("set", "s", "abc")
+        c.call("set", "big", "9223372036854775807")
+        c.call("set", "small", "-9223372036854775808")
+        c.call("zadd", "z", "1", "m")
+        cases = [
+            (("incr", "s"), 4), (("incr", "big"), 4), (("decr", "small"), 4),
+            (("incrby", "big", "1"), 4), (("incrby", "n", "x"), 4),
+            (("incrby", "n", "99999999999999999999"), 4), (("incr", "z"), 3),
+        ]
+        for args, code in cases:
+            err = c.call(*args)
+            self.assertIsInstance(err, ServerError, args)
+            self.assertEqual(err.code, code, args)
+        # failed commands leave the stored values untouched
+        self.assertEqual(c.call("get", "big"), "9223372036854775807")
+        self.assertEqual(c.call("get", "small"), "-9223372036854775808")
+        self.assertEqual(c.call("exists", "n"), 0)
+
     def test_unknown_command_is_an_error(self):
         err = self.client.call("nope")
         self.assertIsInstance(err, ServerError)

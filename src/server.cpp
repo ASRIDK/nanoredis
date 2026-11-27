@@ -7,6 +7,7 @@
 
 #include <cerrno>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -228,6 +229,44 @@ void do_append(const Args &cmd, Buffer &out) {
     out_int(out, static_cast<int64_t>(entry->str.size()));
 }
 
+// Adds ``delta`` to the integer stored as a string at ``key`` (a missing key counts as 0).
+void incr_by(const std::string &key, int64_t delta, Buffer &out) {
+    Entry *entry = lookup_entry(key);
+    int64_t value = 0;
+    if (entry != nullptr) {
+        if (entry->type != ValueType::String) {
+            return out_err(out, ERR_BAD_TYP, "a non-string value exists");
+        }
+        errno = 0;
+        if (!parse_int(entry->str, value) || errno == ERANGE) {
+            return out_err(out, ERR_BAD_ARG, "value is not an integer");
+        }
+    }
+    if ((delta > 0 && value > INT64_MAX - delta) || (delta < 0 && value < INT64_MIN - delta)) {
+        return out_err(out, ERR_BAD_ARG, "increment would overflow");
+    }
+    value += delta;
+    if (entry == nullptr) {
+        entry = insert_entry(key, ValueType::String);
+    }
+    entry->str = std::to_string(value);
+    out_int(out, value);
+}
+
+// incr key / decr key  ->  new value
+void do_incr(const Args &cmd, Buffer &out) { incr_by(cmd[1], 1, out); }
+void do_decr(const Args &cmd, Buffer &out) { incr_by(cmd[1], -1, out); }
+
+// incrby key delta  ->  new value
+void do_incrby(const Args &cmd, Buffer &out) {
+    int64_t delta = 0;
+    errno = 0;
+    if (!parse_int(cmd[2], delta) || errno == ERANGE) {
+        return out_err(out, ERR_BAD_ARG, "expected an integer");
+    }
+    incr_by(cmd[1], delta, out);
+}
+
 void do_keys(const Args &, Buffer &out) {
     out_arr(out, static_cast<uint32_t>(hm_size(&g_data.db)));
     hm_foreach(
@@ -364,6 +403,7 @@ constexpr Command kCommands[] = {
     {"zquery", 6, do_zquery}, {"pexpire", 3, do_pexpire}, {"pttl", 2, do_pttl},
     {"exists", 2, do_exists}, {"dbsize", 1, do_dbsize},
     {"strlen", 2, do_strlen}, {"append", 3, do_append},
+    {"incr", 2, do_incr},     {"decr", 2, do_decr},     {"incrby", 3, do_incrby},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
