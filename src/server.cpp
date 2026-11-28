@@ -267,6 +267,19 @@ void do_incrby(const Args &cmd, Buffer &out) {
     incr_by(cmd[1], delta, out);
 }
 
+// decrby key delta  ->  new value after subtracting ``delta``
+void do_decrby(const Args &cmd, Buffer &out) {
+    int64_t delta = 0;
+    errno = 0;
+    if (!parse_int(cmd[2], delta) || errno == ERANGE) {
+        return out_err(out, ERR_BAD_ARG, "expected an integer");
+    }
+    if (delta == INT64_MIN) {  // -delta is not representable
+        return out_err(out, ERR_BAD_ARG, "decrement would overflow");
+    }
+    incr_by(cmd[1], -delta, out);
+}
+
 void do_keys(const Args &, Buffer &out) {
     out_arr(out, static_cast<uint32_t>(hm_size(&g_data.db)));
     hm_foreach(
@@ -404,6 +417,7 @@ constexpr Command kCommands[] = {
     {"exists", 2, do_exists}, {"dbsize", 1, do_dbsize},
     {"strlen", 2, do_strlen}, {"append", 3, do_append},
     {"incr", 2, do_incr},     {"decr", 2, do_decr},     {"incrby", 3, do_incrby},
+    {"decrby", 3, do_decrby},
 };
 
 void do_request(const Args &cmd, Buffer &out) {
