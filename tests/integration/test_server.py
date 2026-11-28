@@ -119,6 +119,20 @@ class TestStrings(ServerTestCase):
         self.assertEqual(c.call("incrby", "fresh", "41"), 41)
         self.assertEqual(c.call("dbsize"), 2)
 
+    def test_decrby(self):
+        c = self.client
+        self.assertEqual(c.call("decrby", "n", "5"), -5)
+        self.assertEqual(c.call("decrby", "n", "-8"), 3)
+        self.assertEqual(c.call("get", "n"), "3")
+        for args in (("decrby", "n", "x"), ("decrby", "n", "-9223372036854775808")):
+            err = c.call(*args)
+            self.assertIsInstance(err, ServerError, args)
+            self.assertEqual(err.code, 4)
+        c.call("set", "small", "-9223372036854775808")
+        err = c.call("decrby", "small", "1")
+        self.assertIsInstance(err, ServerError)
+        self.assertEqual(err.code, 4)
+
     def test_incr_rejects_bad_values_overflow_and_wrong_types(self):
         c = self.client
         c.call("set", "s", "abc")

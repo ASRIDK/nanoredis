@@ -94,6 +94,7 @@ $ ./build/nanoredis-cli pttl session
 | `append key value`                        | int: length after appending (creates the key) |
 | `incr key` / `decr key`                   | int: new value; a missing key counts as 0, errors if the value is not an integer or would overflow |
 | `incrby key delta`                        | int: new value after adding `delta` |
+| `decrby key delta`                        | int: new value after subtracting `delta` |
 | `del key`                                 | int: 1 if removed, 0 otherwise         |
 | `exists key`                              | int: 1 if the key exists, 0 otherwise  |
 | `dbsize`                                  | int: number of keys                    |
